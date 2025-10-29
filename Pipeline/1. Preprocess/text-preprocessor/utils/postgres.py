@@ -5,6 +5,10 @@ from datetime import datetime
 from psycopg2.extras import Json
 from .formatData import Formatter
 from copy import deepcopy
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class PostGres:
     def __init__(self):
@@ -15,7 +19,7 @@ class PostGres:
             connection = psycopg2.connect(os.environ['DATABASE_URI'])
             return connection
         except psycopg2.Error as e:
-            print("Unable to connect to the database:", e)
+            logger.error(f"Unable to connect to the database: {e}")
             return None
 
     def get_table_columns(self, table_name, table_schema='public'):
@@ -67,7 +71,7 @@ class PostGres:
         type_key = '_'.join(value.lower().split(' '))
 
         # Check Exists
-        exists = self.check_object_key(type_key, 'content_type')
+        exists = self.check_object_key(type_key, os.environ['TYPE_TABLE_NAME'])
 
         if not exists['exists']:
             # Setup Category Value
@@ -79,7 +83,7 @@ class PostGres:
             }
 
             # Insert Category
-            object_id = self.insert_data('content_type', value)
+            object_id = self.insert_data(os.environ['TYPE_TABLE_NAME'], value)
             return object_id
         else:
             # Get Object Id
@@ -93,9 +97,8 @@ class PostGres:
         cursor = connection.cursor()
 
         cursor.execute(
-            f'SELECT id FROM content_embedding '\
-            f'WHERE content_id_id=%s AND file_id_id IS NULL AND ' \
-            f'product_id_id IS NULL AND place_id_id IS NULL',(content_id,))
+            f'SELECT id FROM {os.environ["EMBEDDING_TABLE_NAME"]} '\
+            f'WHERE content_id_id=%s',(content_id,))
 
         data = cursor.fetchall()
 
@@ -106,7 +109,7 @@ class PostGres:
         else:
             return []
 
-    def get_content_by_id(self,table_name, object_id):
+    def get_db_value_by_id(self,table_name, object_id):
         connection = self.connect_to_db()
 
         cursor = connection.cursor()
@@ -126,17 +129,18 @@ class PostGres:
 
             return dict(zip(keys, values))
         else:
-            print('Object does not exist!')
+            logger.error('Object does not exist!')
             return False
 
 
     # Function to insert data into the specified table
-    def insert_data(self, table_name, raw_values):
+    def insert_data(self, table_name, raw_values, add_timestamp=True):
 
         # Set Update Timestamp
         values = raw_values.copy()
-        values['updated_at'] = str(datetime.now())
-        values['created_at'] = str(datetime.now())
+        if add_timestamp:
+            values['updated_at'] = str(datetime.now())
+            values['created_at'] = str(datetime.now())
 
         try:
             connection = self.connect_to_db()
@@ -148,7 +152,7 @@ class PostGres:
                                values=', '.join(['%s' for x in range(len(list(values.keys())))]))
                 cursor.execute(query, tuple(list(values.values())))
                 connection.commit()
-                print("Data inserted successfully into {} table.".format(table_name))
+                logger.info(f"Data inserted successfully into {table_name} table.")
 
                 # Get Posted Value
                 value_id = cursor.fetchone()[0]
@@ -158,16 +162,18 @@ class PostGres:
 
                 return value_id
         except psycopg2.Error as e:
-            print("Error inserting data into {}: ".format(table_name), e)
+            logger.error(f"Error inserting data into {table_name}: {e}")
+            raise e
         finally:
             if connection:
                 connection.close()
 
     # Function to update data in the specified table
-    def update_data(self, table_name, raw_values, value_id):
+    def update_data(self, table_name, raw_values, value_id, add_timestamp=True):
         # Set Update Timestamp
         update_values = raw_values.copy()
-        update_values['updated_at'] = str(datetime.now())
+        if add_timestamp:
+            update_values['updated_at'] = str(datetime.now())
 
         try:
             connection = self.connect_to_db()
@@ -182,20 +188,47 @@ class PostGres:
                 )
                 cursor.execute(update_query, list(update_values.values()))
                 connection.commit()
-                print("Data updated successfully in {} table.".format(table_name))
+                logger.info(f"Data updated successfully in {table_name} table.")
         except psycopg2.Error as e:
-            print("Error updating data in {}: ".format(table_name), e)
+            logger.error(f"Error updating data in {table_name}: {e}")
+            raise e
         finally:
             if connection:
                 connection.close()
 
-    def insert_data_many(self, table_name, raw_values):
+    def update_data_by_content_id(self, table_name, raw_values, content_id, add_timestamp=True):
+        # Set Update Timestamp
+        update_values = raw_values.copy()
+        if add_timestamp:
+            update_values['updated_at'] = str(datetime.now())
+
+        try:
+            connection = self.connect_to_db()
+            if connection:
+                cursor = connection.cursor()
+
+                variable = ', '.join('{}=%s'.format(k) for k in update_values.keys())
+                update_query = ("UPDATE {} SET {} WHERE content_id_id={};").format(
+                    table_name,
+                    variable,
+                    content_id
+                )
+                cursor.execute(update_query, list(update_values.values()))
+                connection.commit()
+                logger.info(f"Data updated successfully in {table_name} table.")
+        except psycopg2.Error as e:
+            logger.error(f"Error updating data in {table_name}: {e}")
+            raise e
+        finally:
+            if connection:
+                connection.close()
+
+    def insert_data_many(self, table_name, raw_values, add_timestamp=True):
         # Set Update Timestamp
         values = raw_values.copy()
-        values['updated_at'] = str(datetime.now())
-        values['created_at'] = str(datetime.now())
-
-        
+        if add_timestamp:
+            values['updated_at'] = str(datetime.now())
+            values['created_at'] = str(datetime.now())
 
         try:
             connection = self.connect_to_db()
@@ -210,7 +243,7 @@ class PostGres:
 
                 cursor.execute(full_query, tuple(values.stack().tolist()))
                 connection.commit()
-                print("Data inserted successfully into {} table.".format(table_name))
+                logger.info(f"Data inserted successfully into {table_name} table.")
 
                 # Get Posted Value
                 value_id = cursor.fetchone()[0]
@@ -220,12 +253,13 @@ class PostGres:
 
                 return value_id
         except psycopg2.Error as e:
-            print("Error inserting data into {}: ".format(table_name), e)
+            logger.error(f"Error inserting data into {table_name}: {e}")
+            raise e
         finally:
             if connection:
                 connection.close()
 
-    def insert_data_many_from_list(self,table_name, insert_list):
+    def insert_data_many_from_list(self,table_name, insert_list, add_timestamp=True):
         try:
             connection = self.connect_to_db()
             if connection:
@@ -237,6 +271,11 @@ class PostGres:
                     for key, item in value.items():
                         if isinstance(item, (list, dict)):
                             value[key] = Json(item)
+
+                if add_timestamp:
+                    for value in values:
+                        value['updated_at'] = str(datetime.now())
+                        value['created_at'] = str(datetime.now())
 
                 keys = values[0].keys()
                 query = cursor.mogrify("INSERT INTO {} ({}) VALUES {} RETURNING {}".format(
@@ -258,12 +297,13 @@ class PostGres:
                     connection.close()
                 return returnValues
         except psycopg2.Error as e:
-            print("Error inserting data into {}: ".format(table_name), e)
+            logger.error(f"Error inserting data into {table_name}: {e}")
+            raise e
         finally:
             if connection:
                 connection.close()
 
-    def update_data_many_from_list(self,table_name, update_list):
+    def update_data_many_from_list(self,table_name, update_list, add_timestamp=True):
 
         try:
             connection = self.connect_to_db()
@@ -277,6 +317,10 @@ class PostGres:
                     for key, item in value.items():
                         if isinstance(item, (list, dict)):
                             value[key] = Json(item)
+
+                if add_timestamp:
+                    for value in update_value:
+                        value['updated_at'] = str(datetime.now())
 
                 full_query = ''
 
@@ -298,61 +342,26 @@ class PostGres:
 
                 cursor.execute(full_query, final_value)
                 connection.commit()
-                print("Data updated successfully in {} table.".format(table_name))
+                logger.info(f"Data updated successfully in {table_name} table.")
         except psycopg2.Error as e:
-            print("Error updating data in {}: ".format(table_name), e)
+            logger.error(f"Error updating data in {table_name}: {e}")
+            raise e
         finally:
             if connection:
                 connection.close()
 
-    def add_content(self,content, metadata):
-        # 
-        content_values = {
-            'content': content,
-            'metadata':Json(metadata),
-            'is_active': True
-        }
-
-        # Add content
-        content_id = self.insert_data('content_content', content_values)
-        return content_id
-
-    def add_content_embeddings(self, embeddings_list):
-        if len(embeddings_list) > 0:
-            # Insert Values Get Id
-            embedding_ids = self.insert_data_many_from_list('content_embedding', embeddings_list)
-
-            # Add to List
-            for x in range(len(embedding_ids)):
-                embeddings_list[x]['id'] = embedding_ids[x][0]
-
-            return embeddings_list, embedding_ids
-        else:
-            return False
-
-    def add_embeddings_to_agents(self, embedding_ids, agent_ids):
-        # Format Values
-        values = [{"embedding_id": embedding_id, "agent_id": agent_id} for embedding_id in embedding_ids for agent_id in agent_ids]
-
-        # Insert Values
-        self.insert_data_many_from_list('content_embedding_agents', values)
-
-    def update_content_embeddings(self,embeddings_list, update_ids):
-        # Initiate Formatter
-        formatter = Formatter()
-
-        # Format for Update
-        update_list = [formatter.format_embedding_update_values(x) for x in embeddings_list]
-
-        # Add Update Ids
-        for x in range(len(update_ids)):
-            update_list[x]['id'] = update_ids[x]
-            update_list[x]['updated_at'] = str(datetime.now())
-
-        # Update From List
-        self.update_data_many_from_list('content_embedding', update_list)
-
-        return update_list
+    def add_content_chunks(self, content_chunks):
+        try:
+            # Insert Content Chunks
+            content_chunks_ids = self.insert_data_many_from_list(os.environ['CONTENT_CHUNK_TABLE_NAME'], content_chunks, add_timestamp=True)
+            logger.info(f"Content Chunks Successfully Added: {len(content_chunks_ids)} New Content Chunks Added")
+            return [x[0] for x in content_chunks_ids]
+        except psycopg2.Error as e:
+            logger.error(f"Error adding content chunks: {e}")
+            raise e
+        finally:
+            if connection:
+                connection.close()
 
     def bulk_delete_list(self,table_name, delete_ids):
 
@@ -371,9 +380,10 @@ class PostGres:
                 cursor.execute(delete_query, (delete_ids,))
 
                 connection.commit()
-                print("Data deleted successfully in {} table.".format(table_name))
+                logger.info(f"Data deleted successfully in {table_name} table.")
         except psycopg2.Error as e:
-            print("Error deleting data in {}: ".format(table_name), e)
+            logger.error(f"Error deleting data in {table_name}: {e}")
+            raise e
         finally:
             if connection:
                 connection.close()
